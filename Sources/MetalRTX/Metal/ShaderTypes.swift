@@ -21,7 +21,7 @@ struct PackedFloat3 {
     init() { self.x = 0; self.y = 0; self.z = 0 }
 }
 
-/// Mirrors `Material` (44 bytes).
+/// Mirrors `Material` (68 bytes).
 struct GPUMaterial {
     var albedo: PackedFloat3
     var roughness: Float
@@ -30,6 +30,10 @@ struct GPUMaterial {
     var transparency: Float
     var ior: Float
     var flags: UInt32
+    var detailScale: Float
+    var detailStrength: Float
+    var bumpStrength: Float
+    var absorption: PackedFloat3
 
     init(_ def: MaterialDef) {
         albedo = PackedFloat3(def.albedo)
@@ -39,6 +43,10 @@ struct GPUMaterial {
         transparency = def.transparency
         ior = def.ior
         flags = def.isWater ? 1 : 0
+        detailScale = def.detailScale
+        detailStrength = def.detailStrength
+        bumpStrength = def.bumpStrength
+        absorption = PackedFloat3(def.absorption)
     }
 }
 
@@ -88,4 +96,20 @@ struct RenderSettings {
     var flashlightPos: PackedFloat3
     var flashlightDir: PackedFloat3
     var fogEnabled: UInt32
+    var sunAngularRadius: Float
+    var emitterCount: UInt32
+}
+
+/// Mirrors `Emitter` (32 bytes).
+struct GPUEmitter {
+    var position: PackedFloat3
+    var radius: Float
+    var emission: PackedFloat3
+    var pad: Float = 0
+
+    init(position: SIMD3<Float>, radius: Float, emission: SIMD3<Float>) {
+        self.position = PackedFloat3(position)
+        self.radius = radius
+        self.emission = PackedFloat3(emission)
+    }
 }

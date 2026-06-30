@@ -10,6 +10,10 @@ struct MaterialDef {
     var transparency: Float
     var ior: Float
     var isWater: Bool
+    var detailScale: Float
+    var detailStrength: Float
+    var bumpStrength: Float
+    var absorption: SIMD3<Float>
 
     init(albedo: SIMD3<Float>,
          roughness: Float = 0.9,
@@ -17,7 +21,11 @@ struct MaterialDef {
          metallic: Float = 0.0,
          transparency: Float = 0.0,
          ior: Float = 1.5,
-         isWater: Bool = false) {
+         isWater: Bool = false,
+         detailScale: Float = 0.0,
+         detailStrength: Float = 0.0,
+         bumpStrength: Float = 0.0,
+         absorption: SIMD3<Float> = .zero) {
         self.albedo = albedo
         self.roughness = roughness
         self.emission = emission
@@ -25,6 +33,10 @@ struct MaterialDef {
         self.transparency = transparency
         self.ior = ior
         self.isWater = isWater
+        self.detailScale = detailScale
+        self.detailStrength = detailStrength
+        self.bumpStrength = bumpStrength
+        self.absorption = absorption
     }
 }
 
@@ -63,34 +75,43 @@ enum BlockType: UInt8, CaseIterable {
         case .air:
             return MaterialDef(albedo: .zero)
         case .grass:
-            return MaterialDef(albedo: SIMD3(0.20, 0.55, 0.16), roughness: 0.95)
+            return MaterialDef(albedo: SIMD3(0.20, 0.55, 0.16), roughness: 0.95,
+                               detailScale: 0.7, detailStrength: 0.35, bumpStrength: 0.12)
         case .dirt:
-            return MaterialDef(albedo: SIMD3(0.36, 0.24, 0.14), roughness: 0.98)
+            return MaterialDef(albedo: SIMD3(0.36, 0.24, 0.14), roughness: 0.98,
+                               detailScale: 1.1, detailStrength: 0.45, bumpStrength: 0.25)
         case .stone:
-            return MaterialDef(albedo: SIMD3(0.42, 0.42, 0.45), roughness: 0.85)
+            return MaterialDef(albedo: SIMD3(0.42, 0.42, 0.45), roughness: 0.85,
+                               detailScale: 0.9, detailStrength: 0.40, bumpStrength: 0.30)
         case .sand:
-            return MaterialDef(albedo: SIMD3(0.80, 0.72, 0.48), roughness: 0.92)
+            return MaterialDef(albedo: SIMD3(0.80, 0.72, 0.48), roughness: 0.92,
+                               detailScale: 2.5, detailStrength: 0.20, bumpStrength: 0.10)
         case .water:
             return MaterialDef(albedo: SIMD3(0.02, 0.10, 0.16),
                                roughness: 0.02,
                                transparency: 0.92,
                                ior: 1.33,
-                               isWater: true)
+                               isWater: true,
+                               absorption: SIMD3(0.45, 0.10, 0.06))
         case .glass:
             return MaterialDef(albedo: SIMD3(0.85, 0.92, 0.95),
                                roughness: 0.02,
                                transparency: 0.95,
-                               ior: 1.5)
+                               ior: 1.5,
+                               absorption: SIMD3(0.03, 0.01, 0.02))
         case .glowstone:
             return MaterialDef(albedo: SIMD3(0.95, 0.78, 0.45),
                                roughness: 0.7,
                                emission: SIMD3(7.0, 4.6, 1.8))
         case .wood:
-            return MaterialDef(albedo: SIMD3(0.30, 0.20, 0.10), roughness: 0.9)
+            return MaterialDef(albedo: SIMD3(0.30, 0.20, 0.10), roughness: 0.9,
+                               detailScale: 1.0, detailStrength: 0.30, bumpStrength: 0.15)
         case .leaves:
-            return MaterialDef(albedo: SIMD3(0.12, 0.36, 0.10), roughness: 0.95)
+            return MaterialDef(albedo: SIMD3(0.12, 0.36, 0.10), roughness: 0.95,
+                               detailScale: 1.8, detailStrength: 0.40, bumpStrength: 0.10)
         case .snow:
-            return MaterialDef(albedo: SIMD3(0.90, 0.92, 0.96), roughness: 0.6)
+            return MaterialDef(albedo: SIMD3(0.90, 0.92, 0.96), roughness: 0.6,
+                               detailScale: 1.5, detailStrength: 0.10, bumpStrength: 0.06)
         case .lantern:
             return MaterialDef(albedo: SIMD3(0.95, 0.85, 0.55),
                                roughness: 0.5,

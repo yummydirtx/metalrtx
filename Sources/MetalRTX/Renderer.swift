@@ -32,6 +32,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var prevNormalTex: MTLTexture?
     private var reflPosTex: MTLTexture?        // xyz virtual reflected pos, w valid flag
     private var prevReflPosTex: MTLTexture?
+    private var accumTex: [MTLTexture?] = [nil, nil]    // progressive HDR accumulation (32-bit, ground-truth convergence)
     private var histColor: [MTLTexture?] = [nil, nil]   // ping-pong across frames
     private var atrousTex: [MTLTexture?] = [nil, nil]   // ping-pong within a frame
     private var outputTexture: MTLTexture?     // tone-mapped LDR (shared, readable)
@@ -59,6 +60,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     var waveSpeed: Float = 0.55 { didSet { settingsDirty = true } }
     var denoiseEnabled = true { didSet { settingsDirty = true } }
     var sunStrength: Float = 11 { didSet { settingsDirty = true } }
+    /// Angular radius of the sun disk in radians; larger values give softer shadow penumbrae.
+    var sunAngularRadius: Float = 0.03 { didSet { settingsDirty = true } }
     var flashlightOn = false { didSet { settingsDirty = true; onFlashlightChanged?(flashlightOn) } }
     /// When true a thin volumetric fog is enabled so the flashlight beam cone is visible.
     var fogOn = false { didSet { settingsDirty = true; onFogChanged?(fogOn) } }
@@ -141,6 +144,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard let colorTex, let normalDepthTex, let posTex,
               let prevPosTex, let prevNormalTex, let output = outputTexture,
               let reflPosTex, let prevReflPosTex,
+              let accumPrev = accumTex[frameParity],
+              let accumCurr = accumTex[1 - frameParity],
               let histPrev = histColor[frameParity],
               let histCurr = histColor[1 - frameParity],
               let atrous0 = atrousTex[0], let atrous1 = atrousTex[1] else { return }
@@ -186,16 +191,21 @@ final class Renderer: NSObject, MTKViewDelegate {
             encoder.setBuffer(scene.primitiveBuffer, offset: 0, index: 3)
             encoder.setBuffer(scene.instanceOffsetBuffer, offset: 0, index: 4)
             encoder.setBuffer(scene.materialBuffer, offset: 0, index: 5)
+            encoder.setBuffer(scene.emitterBuffer, offset: 0, index: 6)
             encoder.setTexture(colorTex, index: 0)
             encoder.setTexture(normalDepthTex, index: 1)
             encoder.setTexture(posTex, index: 2)
             encoder.setTexture(reflPosTex, index: 3)
+            encoder.setTexture(accumPrev, index: 4)
+            encoder.setTexture(accumCurr, index: 5)
             for blas in scene.blases { encoder.useResource(blas, usage: .read) }
             dispatch(encoder, pipeline: pathTracePipeline, width: width, height: height)
             encoder.endEncoding()
         }
 
-        var tonemapInput: MTLTexture = colorTex
+        // Default to the 32-bit progressive accumulation buffer (ground-truth convergence
+        // while the camera holds still); the denoiser overrides this when enabled.
+        var tonemapInput: MTLTexture = accumCurr
 
         if denoiseEnabled {
             // --- 2. Temporal reprojection ---------------------------------------
@@ -311,6 +321,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         prevNormalTex = make(.rgba16Float, "PrevNormal")
         reflPosTex = make(.rgba32Float, "ReflVirtualPos")
         prevReflPosTex = make(.rgba32Float, "PrevReflVirtualPos")
+        accumTex = [make(.rgba32Float, "AccumA"), make(.rgba32Float, "AccumB")]
         histColor = [make(.rgba16Float, "HistColorA"), make(.rgba16Float, "HistColorB")]
         atrousTex = [make(.rgba16Float, "AtrousA"), make(.rgba16Float, "AtrousB")]
         outputTexture = make(.bgra8Unorm, shared: true, "OutputLDR")
@@ -342,7 +353,9 @@ final class Renderer: NSObject, MTKViewDelegate {
             flashlightEnabled: flashlightOn ? 1 : 0,
             flashlightPos: PackedFloat3(flashlightFrozen ? frozenFlashlightPos : flashlightOrigin()),
             flashlightDir: PackedFloat3(flashlightFrozen ? frozenFlashlightDir : normalize(camera.forward)),
-            fogEnabled: fogOn ? 1 : 0
+            fogEnabled: fogOn ? 1 : 0,
+            sunAngularRadius: sunAngularRadius,
+            emitterCount: UInt32(scene.emitterCount)
         )
     }
 

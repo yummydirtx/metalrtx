@@ -24,6 +24,61 @@ inline bool traceShadow(instance_acceleration_structure tlas,
     return hit.type != intersection_type::none;
 }
 
+// Direct lighting from the emissive blocks (glowstone / lanterns) via next-event
+// estimation. Resampled importance sampling (RIS) draws a few candidate emitters,
+// keeps one weighted by ~power/distance², then samples its sphere and shadow-tests
+// it. This gives clean local light and soft contact shadows from emitters instead
+// of relying on rare random GI bounces. Returns the diffuse direct contribution.
+inline float3 sampleEmitters(instance_acceleration_structure tlas,
+                             device const Emitter *emitters,
+                             constant RenderSettings &settings,
+                             float3 P, float3 Ns, float3 albedo,
+                             thread uint &seed) {
+    uint n = settings.emitterCount;
+    if (n == 0u) return float3(0.0f);
+
+    // --- RIS: resample one emitter from M uniform candidates -------------------
+    uint M = min(n, 8u);
+    float wsum = 0.0f;
+    int chosen = -1;
+    float chosenTarget = 0.0f;
+    for (uint k = 0u; k < M; ++k) {
+        uint idx = min(uint(randFloat(seed) * float(n)), n - 1u);
+        Emitter e = emitters[idx];
+        float3 d = float3(e.position) - P;
+        float dist2 = max(dot(d, d), 1e-4f);
+        float NdotLc = max(dot(Ns, d * rsqrt(dist2)), 0.0f);
+        float target = luminance(float3(e.emission)) * NdotLc / dist2;
+        wsum += target;
+        if (target > 0.0f && randFloat(seed) * wsum < target) {
+            chosen = int(idx);
+            chosenTarget = target;
+        }
+    }
+    if (chosen < 0 || wsum <= 0.0f) return float3(0.0f);
+
+    // --- Sample the chosen emitter's sphere and shadow-test it ------------------
+    Emitter em = emitters[uint(chosen)];
+    float3 toL = float3(em.position) - P;
+    float dist2 = dot(toL, toL);
+    float dist = sqrt(dist2);
+    if (dist <= em.radius) return float3(0.0f);
+    float3 dir = toL / dist;
+    float sinMax2 = (em.radius * em.radius) / dist2;
+    float cosMax = sqrt(max(0.0f, 1.0f - sinMax2));
+    float3 L = sampleCone(dir, cosMax, rand2(seed));
+
+    float NdotL = max(dot(Ns, L), 0.0f);
+    if (NdotL <= 0.0f) return float3(0.0f);
+    float3 origin = P + Ns * 1e-3f;
+    if (traceShadow(tlas, origin, L, dist - em.radius * 1.02f)) return float3(0.0f);
+
+    float solidAngle = TWO_PI * (1.0f - cosMax);
+    float3 f = albedo * INV_PI * float3(em.emission) * NdotL * solidAngle;
+    float risW = (float(n) * wsum) / (float(M) * chosenTarget);
+    return f * risW;
+}
+
 // Direct lighting from the camera-mounted flashlight: a soft-edged spotlight at the
 // camera position aimed along its forward axis. Returns the (unshadowed-if-visible)
 // diffuse contribution for a hit point, or zero when disabled / outside the cone.
@@ -293,10 +348,12 @@ inline float3 traceRadiance(instance_acceleration_structure tlas,
                             device const PrimitiveData *primitives,
                             device const uint *instanceOffsets,
                             device const Material *materials,
+                            device const Emitter *emitters,
                             constant RenderSettings &settings,
                             float3 sunDir,
                             float3 ro, float3 rd, float3 throughput,
                             uint maxBounces,
+                            float3 mediumAbsorption,
                             thread float &firstHitT,
                             thread uint &seed) {
     float3 radiance = float3(0.0f);
@@ -310,6 +367,14 @@ inline float3 traceRadiance(instance_acceleration_structure tlas,
     isect.assume_geometry_type(geometry_type::triangle);
     isect.force_opacity(forced_opacity::opaque);
 
+    // Emission is added on a hit only when it was not already accounted for by
+    // next-event estimation on the previous bounce (avoids double counting emitters).
+    bool countEmission = true;
+
+    // Participating-medium state for depth-based Beer-Lambert absorption (water/glass).
+    bool inMedium = any(mediumAbsorption > float3(0.0f));
+    float3 curAbsorption = mediumAbsorption;
+
     for (uint bounce = 0; bounce <= maxBounces; ++bounce) {
         ray r;
         r.origin = ro;
@@ -320,11 +385,15 @@ inline float3 traceRadiance(instance_acceleration_structure tlas,
         auto hit = isect.intersect(r, tlas);
         if (hit.type == intersection_type::none) {
             if (bounce == 0u) firstHitT = 1.0e4f;
-            radiance += throughput * skyColor(rd, settings);
+            radiance += throughput * (bounce == 0u ? skyWithClouds(ro, rd, settings)
+                                                   : skyColor(rd, settings));
             break;
         }
 
         if (bounce == 0u) firstHitT = hit.distance;
+
+        // Beer-Lambert: attenuate by the distance just travelled inside a medium.
+        if (inMedium) throughput *= exp(-curAbsorption * hit.distance);
 
         uint primIndex = instanceOffsets[hit.instance_id] + hit.primitive_id;
         PrimitiveData prim = primitives[primIndex];
@@ -335,7 +404,7 @@ inline float3 traceRadiance(instance_acceleration_structure tlas,
         bool backface = dot(N, rd) > 0.0f;
         float3 Ns = backface ? -N : N;
 
-        radiance += throughput * float3(mat.emission);
+        if (countEmission) radiance += throughput * float3(mat.emission);
 
         if (mat.transparency > 0.5f) {
             if (mat.flags & MATERIAL_FLAG_WATER) {
@@ -366,34 +435,115 @@ inline float3 traceRadiance(instance_acceleration_structure tlas,
 
             float3 newDir;
             if (tir || randFloat(seed) < fres) {
-                newDir = reflect(rd, Ns);
+                newDir = reflect(rd, Ns);   // same side of the interface: medium unchanged
             } else {
                 newDir = normalize(refr);
-                throughput *= mix(float3(1.0f), float3(mat.albedo) * 4.0f + 0.6f, 0.25f);
+                // Crossing the interface toggles the participating medium.
+                if (backface) {
+                    inMedium = false;              // exiting the dielectric into air
+                    curAbsorption = float3(0.0f);
+                } else {
+                    inMedium = true;               // entering the dielectric
+                    curAbsorption = float3(mat.absorption);
+                }
             }
             ro = hitP + newDir * 1e-3f;
             rd = newDir;
-        } else if (mat.metallic > 0.5f) {
-            float roughness = max(mat.roughness, 0.02f);
-            float3 H = sampleGGX(Ns, roughness, rand2(seed));
-            float3 newDir = reflect(rd, H);
-            if (dot(newDir, Ns) <= 0.0f) break;
-            ro = hitP + Ns * 1e-3f;
-            rd = newDir;
-            throughput *= float3(mat.albedo);
+            countEmission = true;
         } else {
+            // ---- Opaque surface: procedural detail + Cook-Torrance shading ----
             float3 albedo = float3(mat.albedo);
-            float NdotL = max(dot(Ns, sunDir), 0.0f);
-            if (NdotL > 0.0f) {
-                float3 shadowOrigin = hitP + Ns * 1e-3f;
-                if (!traceShadow(tlas, shadowOrigin, sunDir, 1e4f)) {
-                    radiance += throughput * albedo * INV_PI * sunRadiance(settings) * NdotL;
+            float roughness = max(mat.roughness, 0.03f);
+            Ns = surfaceDetail(hitP, Ns, albedo, roughness,
+                               mat.detailScale, mat.detailStrength, mat.bumpStrength);
+            float3 V = -rd;
+            float NdotV = max(dot(Ns, V), 1e-3f);
+            float a = roughness * roughness;
+
+            if (mat.metallic > 0.5f) {
+                // ---- Metal: tinted GGX specular (F0 = albedo), Fresnel + Smith G ----
+                float3 L = sampleCone(sunDir, cos(settings.sunAngularRadius), rand2(seed));
+                float NdotL = max(dot(Ns, L), 0.0f);
+                if (NdotL > 0.0f) {
+                    float3 so = hitP + Ns * 1e-3f;
+                    if (!traceShadow(tlas, so, L, 1e4f)) {
+                        float3 H = normalize(L + V);
+                        float NdotH = max(dot(Ns, H), 0.0f);
+                        float VdotH = max(dot(V, H), 0.0f);
+                        float D = ggxD(NdotH, a);
+                        float G = smithG(NdotV, NdotL, a);
+                        float3 F = fresnelSchlick(VdotH, albedo);
+                        float3 spec = D * G * F / (4.0f * NdotV * NdotL);
+                        radiance += throughput * spec * sunRadiance(settings) * NdotL;
+                    }
+                }
+                float3 H = sampleGGX(Ns, roughness, rand2(seed));
+                float3 newDir = reflect(rd, H);
+                if (dot(newDir, Ns) <= 0.0f) break;
+                float NdotL2 = max(dot(Ns, newDir), 1e-4f);
+                float VdotH = max(dot(V, H), 1e-4f);
+                float NdotH = max(dot(Ns, H), 1e-4f);
+                float3 F = fresnelSchlick(VdotH, albedo);
+                float G = smithG(NdotV, NdotL2, a);
+                throughput *= F * G * VdotH / (NdotV * NdotH);
+                ro = hitP + Ns * 1e-3f;
+                rd = newDir;
+                countEmission = true;
+            } else {
+                // ---- Dielectric: Lambertian diffuse + GGX clear-coat specular ----
+                // Fade the specular lobe out on very rough surfaces (foliage/dirt/sand)
+                // so they read as matte and don't catch harsh sun glints, while keeping a
+                // crisp sheen on smoother snow/stone.
+                float specScale = 1.0f - smoothstep(0.7f, 0.92f, roughness);
+                const float F0 = 0.04f;
+                float Fr = (F0 + (1.0f - F0) * pow(1.0f - NdotV, 5.0f)) * specScale;
+
+                // Sun next-event estimation (diffuse + specular highlight) with a
+                // sun-disk-sampled shadow ray for soft penumbrae.
+                float3 L = sampleCone(sunDir, cos(settings.sunAngularRadius), rand2(seed));
+                float NdotL = max(dot(Ns, L), 0.0f);
+                if (NdotL > 0.0f) {
+                    float3 shadowOrigin = hitP + Ns * 1e-3f;
+                    if (!traceShadow(tlas, shadowOrigin, L, 1e4f)) {
+                        float3 sunR = sunRadiance(settings);
+                        float3 H = normalize(L + V);
+                        float NdotH = max(dot(Ns, H), 0.0f);
+                        float VdotH = max(dot(V, H), 0.0f);
+                        float D = ggxD(NdotH, a);
+                        float G = smithG(NdotV, NdotL, a);
+                        float Fs = F0 + (1.0f - F0) * pow(1.0f - VdotH, 5.0f);
+                        float spec = D * G * Fs / (4.0f * NdotV * NdotL) * specScale;
+                        float3 diff = albedo * INV_PI * (1.0f - Fs * specScale);
+                        radiance += throughput * (diff + spec) * sunR * NdotL;
+                    }
+                }
+                radiance += throughput * flashlightDirect(tlas, settings, hitP, Ns, albedo);
+
+                // Emitter next-event estimation (diffuse direct lighting).
+                radiance += throughput * sampleEmitters(tlas, emitters, settings, hitP, Ns, albedo, seed);
+
+                // Indirect: stochastically pick the specular or diffuse lobe.
+                float pSpec = clamp(Fr, 0.0f, 0.9f);
+                if (specScale > 0.0f && randFloat(seed) < pSpec) {
+                    float3 H = sampleGGX(Ns, roughness, rand2(seed));
+                    float3 newDir = reflect(rd, H);
+                    if (dot(newDir, Ns) <= 0.0f) break;
+                    float NdotL2 = max(dot(Ns, newDir), 1e-4f);
+                    float VdotH = max(dot(V, H), 1e-4f);
+                    float NdotH = max(dot(Ns, H), 1e-4f);
+                    float Fs = F0 + (1.0f - F0) * pow(1.0f - VdotH, 5.0f);
+                    float G = smithG(NdotV, NdotL2, a);
+                    throughput *= (Fs * specScale * G * VdotH / (NdotV * NdotH)) / pSpec;
+                    ro = hitP + Ns * 1e-3f;
+                    rd = newDir;
+                    countEmission = true;
+                } else {
+                    rd = cosineSampleHemisphere(Ns, rand2(seed));
+                    ro = hitP + Ns * 1e-3f;
+                    throughput *= albedo * (1.0f - Fr) / (1.0f - pSpec);
+                    countEmission = false;
                 }
             }
-            radiance += throughput * flashlightDirect(tlas, settings, hitP, Ns, albedo);
-            rd = cosineSampleHemisphere(Ns, rand2(seed));
-            ro = hitP + Ns * 1e-3f;
-            throughput *= albedo;
         }
 
         if (bounce > 3u) {
@@ -412,10 +562,13 @@ kernel void pathTrace(instance_acceleration_structure tlas        [[buffer(0)]],
                       device const PrimitiveData *primitives      [[buffer(3)]],
                       device const uint *instanceOffsets          [[buffer(4)]],
                       device const Material *materials            [[buffer(5)]],
+                      device const Emitter *emitters              [[buffer(6)]],
                       texture2d<float, access::write> outColor       [[texture(0)]],
                       texture2d<float, access::write> outNormalDepth [[texture(1)]],
                       texture2d<float, access::write> outPos         [[texture(2)]],
                       texture2d<float, access::write> outReflPos     [[texture(3)]],
+                      texture2d<float, access::read>  prevAccum      [[texture(4)]],
+                      texture2d<float, access::write> outAccum       [[texture(5)]],
                       uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= settings.width || gid.y >= settings.height) return;
 
@@ -472,7 +625,7 @@ kernel void pathTrace(instance_acceleration_structure tlas        [[buffer(0)]],
         gMaterialId = -2.0f;                 // distinct id keeps the denoiser from blending it
         gViewZ = fl.t;
     } else if (phit.type == intersection_type::none) {
-        radiance = skyColor(rd, settings);
+        radiance = skyWithClouds(ro, rd, settings);
     } else {
         uint primIndex = instanceOffsets[phit.instance_id] + phit.primitive_id;
         PrimitiveData prim = primitives[primIndex];
@@ -488,9 +641,8 @@ kernel void pathTrace(instance_acceleration_structure tlas        [[buffer(0)]],
         gMaterialId = float(prim.materialIndex);
         gViewZ = phit.distance;
 
-        radiance += float3(mat.emission);
-
         if (mat.transparency > 0.5f) {
+            radiance += float3(mat.emission);
             // ---- Deterministic Fresnel split on the primary water/glass hit ----
             // Trace BOTH the reflection and refraction sub-paths and weight them
             // by Fresnel, instead of randomly picking one per frame. This removes
@@ -523,9 +675,9 @@ kernel void pathTrace(instance_acceleration_structure tlas        [[buffer(0)]],
             float3 reflO = hitP + refl * 1e-3f;
             float reflHitT = 1.0e4f;
             radiance += reflW * traceRadiance(tlas, primitives, instanceOffsets,
-                                              materials, settings, sunDir,
+                                              materials, emitters, settings, sunDir,
                                               reflO, refl, float3(1.0f), subBounces,
-                                              reflHitT, seed);
+                                              float3(0.0f), reflHitT, seed);
 
             // Explicit flashlight response on the water surface (point lights are never hit
             // by the reflection ray, so this is what makes the beam visible on water).
@@ -539,32 +691,49 @@ kernel void pathTrace(instance_acceleration_structure tlas        [[buffer(0)]],
             gReflPos = float4(virtualPos, 1.0f);
 
             if (!tir) {
-                float3 tint = mix(float3(1.0f), float3(mat.albedo) * 4.0f + 0.6f, 0.25f);
                 float3 rdir = normalize(refr);
                 float3 refrO = hitP + rdir * 1e-3f;
                 float refrHitT = 1.0e4f;
                 radiance += (1.0f - fres) * traceRadiance(tlas, primitives, instanceOffsets,
-                                                          materials, settings, sunDir,
-                                                          refrO, rdir, tint, subBounces,
-                                                          refrHitT, seed);
+                                                          materials, emitters, settings, sunDir,
+                                                          refrO, rdir, float3(1.0f), subBounces,
+                                                          float3(mat.absorption), refrHitT, seed);
             }
         } else {
             // Metal / diffuse: the unified tracer handles shading and bounces.
             float primHitT = 1.0e4f;
             radiance += traceRadiance(tlas, primitives, instanceOffsets,
-                                      materials, settings, sunDir,
+                                      materials, emitters, settings, sunDir,
                                       ro, rd, float3(1.0f), settings.maxBounces,
-                                      primHitT, seed);
+                                      float3(0.0f), primHitT, seed);
         }
     }
 
     // Volumetric in-scatter of the flashlight beam through the thin fog (if enabled).
     radiance += flashlightVolumetric(tlas, settings, ro, rd, gViewZ, seed);
 
-    // Clamp the worst fireflies before they enter the denoiser.
+    // Aerial perspective: gently fade distant geometry into the atmospheric haze.
+    if (gMaterialId >= 0.0f) {
+        float fog = 1.0f - exp(-gViewZ * 0.00035f);
+        radiance = mix(radiance, skyColor(rd, settings), fog * 0.6f);
+    }
+
+    // Clamp the worst fireflies before they enter the accumulation buffer / denoiser.
     radiance = min(radiance, float3(48.0f));
 
-    outColor.write(float4(radiance, 1.0f), gid);
+    // --- Progressive HDR accumulation ------------------------------------------
+    // Average this sample into the running mean while the camera/scene holds still
+    // (accumulatedFrames resets to 0 on any change). The 32-bit accumulation buffer
+    // converges to a noise-free ground-truth image for stills, and feeds the
+    // denoiser a progressively cleaner signal while moving.
+    float3 accum = radiance;
+    if (cam.accumulatedFrames > 0u) {
+        float3 prev = prevAccum.read(gid).rgb;
+        accum = mix(prev, radiance, 1.0f / float(cam.accumulatedFrames + 1u));
+    }
+    outAccum.write(float4(accum, 1.0f), gid);
+
+    outColor.write(float4(accum, 1.0f), gid);
     outNormalDepth.write(float4(gNormal, gViewZ), gid);
     outPos.write(float4(gPos, gMaterialId), gid);
     outReflPos.write(gReflPos, gid);

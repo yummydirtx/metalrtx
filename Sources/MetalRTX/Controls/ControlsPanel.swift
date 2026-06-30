@@ -21,6 +21,7 @@ final class ControlsPanel {
     private var exposureRow: Row!
     private var sunRow: Row!
     private var bouncesRow: Row!
+    private var sunAngleRow: Row!
     private var denoiseToggle: NSButton!
     private var flashlightToggle: NSButton!
     private var freezeFlashlightToggle: NSButton!
@@ -76,6 +77,10 @@ final class ControlsPanel {
                              action: #selector(bouncesChanged(_:)))
         bouncesRow.slider.numberOfTickMarks = 12
         bouncesRow.slider.allowsTickMarkValuesOnly = true
+
+        sunAngleRow = makeRow(in: content, "Sun Softness", min: 0, max: 0.15,
+                              value: Double(renderer?.sunAngularRadius ?? 0.03),
+                              action: #selector(sunAngleChanged(_:)))
 
         denoiseToggle = NSButton(checkboxWithTitle: "Denoiser",
                                  target: self, action: #selector(denoiseToggled(_:)))
@@ -171,7 +176,7 @@ final class ControlsPanel {
     // MARK: - Layout
 
     private var collapsedHeight: CGFloat {
-        topPad + 4 * rowHeight + 3 * toggleHeight + headerHeight + tailGap
+        topPad + 5 * rowHeight + 3 * toggleHeight + headerHeight + tailGap
     }
 
     private var expandedHeight: CGFloat {
@@ -208,6 +213,7 @@ final class ControlsPanel {
         place(exposureRow)
         place(sunRow)
         place(bouncesRow)
+        place(sunAngleRow)
 
         denoiseToggle.frame = NSRect(x: 16, y: y - 2, width: 120, height: 20)
         flashlightToggle.frame = NSRect(x: 144, y: y - 2, width: 150, height: 20)
@@ -270,6 +276,11 @@ final class ControlsPanel {
         refreshReadouts()
     }
 
+    @objc private func sunAngleChanged(_ sender: NSSlider) {
+        renderer?.sunAngularRadius = Float(sender.doubleValue)
+        refreshReadouts()
+    }
+
     @objc private func waveAmplitudeChanged(_ sender: NSSlider) {
         renderer?.waveAmplitude = Float(sender.doubleValue)
         refreshReadouts()
@@ -312,6 +323,7 @@ final class ControlsPanel {
         exposureRow.readout.stringValue = String(format: "%.2f", r.exposure)
         sunRow.readout.stringValue = String(format: "%.1f", r.sunStrength)
         bouncesRow.readout.stringValue = "\(r.maxBounces)"
+        sunAngleRow.readout.stringValue = String(format: "%.3f", r.sunAngularRadius)
         waterRows[0].readout.stringValue = String(format: "%.2f", r.waveAmplitude)
         waterRows[1].readout.stringValue = String(format: "%.2f", r.waveChoppiness)
         waterRows[2].readout.stringValue = String(format: "%.2f", r.waveSpeed)

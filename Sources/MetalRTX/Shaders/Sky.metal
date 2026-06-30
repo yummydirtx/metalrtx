@@ -81,6 +81,53 @@ inline float3 skyColor(float3 dir, constant RenderSettings &s) {
     return max(sky, 0.0f);
 }
 
+// ---- Procedural cloud layer -------------------------------------------------
+// A single animated 2D cloud sheet at a fixed altitude, composited over the
+// analytic sky. fBm coverage gives soft, drifting cumulus shapes; a cheap
+// directional self-shadow and a sunward "silver lining" rim give them volume.
+// Evaluated only for primary rays and first-bounce reflections (not GI) to keep
+// the cost down.
+inline float3 renderClouds(float3 ro, float3 rd, constant RenderSettings &s, float3 skyCol) {
+    if (rd.y <= 0.02f) return skyCol;
+
+    const float cloudH = 140.0f;                       // cloud sheet altitude
+    float t = (cloudH - ro.y) / rd.y;
+    if (t <= 0.0f) return skyCol;
+    float3 hit = ro + rd * t;
+
+    // Animated coverage field.
+    float2 uv = hit.xz * 0.008f + float2(0.05f, 0.018f) * s.elapsedTime;
+    float n = fbm3(float3(uv.x, 0.0f, uv.y), 5);
+
+    float3 sunDir = normalize(float3(s.sunDirection));
+    float day = smoothstep(-0.05f, 0.25f, sunDir.y);
+
+    const float coverage = 0.46f;
+    float density = smoothstep(coverage, coverage + 0.20f, n);
+    density *= smoothstep(0.02f, 0.22f, rd.y);          // thin out toward the horizon
+    if (density <= 0.001f) return skyCol;
+
+    // Directional self-shadow: compare density a step toward the sun.
+    float n2 = fbm3(float3(uv.x + sunDir.x * 0.04f, 0.0f, uv.y + sunDir.z * 0.04f), 4);
+    float shade = clamp(0.55f + (n - n2) * 2.5f, 0.25f, 1.15f);
+
+    float3 baseLit = mix(float3(0.55f, 0.58f, 0.65f), float3(1.0f, 0.98f, 0.94f), day);
+    float golden = smoothstep(0.35f, 0.0f, fabs(sunDir.y)) * day;
+    baseLit = mix(baseLit, float3(1.1f, 0.7f, 0.45f), golden * 0.6f);
+    float3 cloudCol = baseLit * shade;
+
+    // Silver lining toward the sun, strongest through thin cloud.
+    float vdotl = max(dot(rd, sunDir), 0.0f);
+    cloudCol += float3(1.0f, 0.92f, 0.78f) * pow(vdotl, 6.0f) * (1.0f - density) * day;
+
+    return mix(skyCol, cloudCol, density * (0.5f + 0.5f * day));
+}
+
+/// Full sky including clouds, for primary rays and first-bounce reflections.
+inline float3 skyWithClouds(float3 ro, float3 rd, constant RenderSettings &s) {
+    return renderClouds(ro, rd, s, skyColor(rd, s));
+}
+
 /// Radiance of the sun itself, for next-event estimation toward the directional light.
 inline float3 sunRadiance(constant RenderSettings &s) {
     return s.sunColor * s.sunIntensity;

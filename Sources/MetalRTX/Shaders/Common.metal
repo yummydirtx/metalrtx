@@ -55,6 +55,8 @@ struct RenderSettings {
     packed_float3 flashlightPos; // world-space light position (camera)
     packed_float3 flashlightDir; // normalized aim direction (camera forward)
     uint  fogEnabled;           // 1 = thin volumetric fog so the beam cone is visible
+    float sunAngularRadius;     // angular radius of the sun disk (radians) for soft shadows
+    uint  emitterCount;         // number of emissive blocks sampled by next-event estimation
 };
 
 // ---- Material (must match ShaderTypes.swift) --------------------------------
@@ -67,9 +69,24 @@ struct Material {
     float transparency;     // 0 = opaque, 1 = fully transparent (glass/water)
     float ior;              // index of refraction
     uint  flags;            // bit0 = isWater
+    float detailScale;      // procedural noise frequency (0 disables surface detail)
+    float detailStrength;   // albedo variation amount
+    float bumpStrength;     // normal-perturbation amount
+    packed_float3 absorption; // Beer-Lambert extinction per unit distance (dielectrics)
 };
 
 constant uint MATERIAL_FLAG_WATER = 1u;
+
+// ---- Emissive blocks for next-event estimation (must match ShaderTypes.swift) ----
+
+// A spherical light approximating one emissive voxel, sampled directly so emissive
+// blocks cast clean local lighting and soft shadows instead of relying on random GI.
+struct Emitter {
+    packed_float3 position;   // block center, world space
+    float radius;             // sphere radius
+    packed_float3 emission;   // emitted radiance
+    float _pad;
+};
 
 // ---- Geometry buffers -------------------------------------------------------
 
@@ -138,11 +155,100 @@ inline float3 sampleGGX(float3 n, float roughness, float2 u) {
     return normalize(t * h.x + b * h.y + n * h.z);
 }
 
+// Uniformly sample a direction inside a cone of half-angle acos(cosThetaMax) around
+// `axis`. Used to sample the sun disk (soft shadows) and spherical emitters.
+inline float3 sampleCone(float3 axis, float cosThetaMax, float2 u) {
+    float cosTheta = 1.0f - u.x * (1.0f - cosThetaMax);
+    float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
+    float phi = TWO_PI * u.y;
+    float3 t, b;
+    onb(axis, t, b);
+    return normalize(t * (cos(phi) * sinTheta) + b * (sin(phi) * sinTheta) + axis * cosTheta);
+}
+
 // Schlick Fresnel.
 inline float3 fresnelSchlick(float cosTheta, float3 f0) {
     float m = clamp(1.0f - cosTheta, 0.0f, 1.0f);
     float m2 = m * m;
     return f0 + (1.0f - f0) * (m2 * m2 * m);
+}
+
+// ---- Procedural surface detail (value-noise fBm) ---------------------------
+
+inline float hash13(float3 p) {
+    p = fract(p * 0.1031f);
+    p += dot(p, p.yzx + 33.33f);
+    return fract((p.x + p.y) * p.z);
+}
+
+// Smooth trilinear value noise in [0, 1).
+inline float valueNoise3(float3 p) {
+    float3 i = floor(p);
+    float3 f = fract(p);
+    f = f * f * (3.0f - 2.0f * f);
+    float n000 = hash13(i + float3(0.0f, 0.0f, 0.0f));
+    float n100 = hash13(i + float3(1.0f, 0.0f, 0.0f));
+    float n010 = hash13(i + float3(0.0f, 1.0f, 0.0f));
+    float n110 = hash13(i + float3(1.0f, 1.0f, 0.0f));
+    float n001 = hash13(i + float3(0.0f, 0.0f, 1.0f));
+    float n101 = hash13(i + float3(1.0f, 0.0f, 1.0f));
+    float n011 = hash13(i + float3(0.0f, 1.0f, 1.0f));
+    float n111 = hash13(i + float3(1.0f, 1.0f, 1.0f));
+    float nx00 = mix(n000, n100, f.x);
+    float nx10 = mix(n010, n110, f.x);
+    float nx01 = mix(n001, n101, f.x);
+    float nx11 = mix(n011, n111, f.x);
+    return mix(mix(nx00, nx10, f.y), mix(nx01, nx11, f.y), f.z);
+}
+
+inline float fbm3(float3 p, int octaves) {
+    float sum = 0.0f, amp = 0.5f, norm = 0.0f;
+    for (int i = 0; i < octaves; ++i) {
+        sum += amp * valueNoise3(p);
+        norm += amp;
+        p *= 2.02f;
+        amp *= 0.5f;
+    }
+    return sum / norm;
+}
+
+// Modulates albedo + roughness and perturbs the shading normal using world-space
+// value-noise fBm, turning flat voxel faces into varied, slightly bumpy surfaces.
+// Returns the perturbed normal; `albedo` and `roughness` are modified in place.
+inline float3 surfaceDetail(float3 worldPos, float3 N,
+                            thread float3 &albedo, thread float &roughness,
+                            float detailScale, float detailStrength, float bumpStrength) {
+    if (detailScale <= 0.0f) return N;
+    float3 p = worldPos * detailScale;
+    float h = fbm3(p, 4);
+    float centered = h - 0.5f;
+    albedo *= clamp(1.0f + centered * detailStrength, 0.0f, 2.0f);
+    roughness = clamp(roughness - centered * 0.20f, 0.03f, 1.0f);
+    if (bumpStrength <= 0.0f) return N;
+    float3 t, b;
+    onb(N, t, b);
+    const float eps = 0.5f;
+    float hT = fbm3((worldPos + t * eps) * detailScale, 4);
+    float hB = fbm3((worldPos + b * eps) * detailScale, 4);
+    float2 grad = float2(hT - h, hB - h) / eps;
+    return normalize(N - (t * grad.x + b * grad.y) * bumpStrength);
+}
+
+// ---- Microfacet BRDF terms (GGX NDF / Smith masking-shadowing) -------------
+
+inline float ggxD(float NdotH, float a) {
+    float a2 = a * a;
+    float d = (NdotH * NdotH) * (a2 - 1.0f) + 1.0f;
+    return a2 / max(PI * d * d, 1e-7f);
+}
+
+inline float smithG1(float NdotX, float a) {
+    float a2 = a * a;
+    return 2.0f * NdotX / max(NdotX + sqrt(a2 + (1.0f - a2) * NdotX * NdotX), 1e-7f);
+}
+
+inline float smithG(float NdotV, float NdotL, float a) {
+    return smithG1(NdotV, a) * smithG1(NdotL, a);
 }
 
 inline float luminance(float3 c) {

@@ -14,6 +14,9 @@ struct Scene {
     let instanceOffsetBuffer: MTLBuffer
     /// Packed material table indexed by `materialIndex`.
     let materialBuffer: MTLBuffer
+    /// Spherical lights (one per emissive voxel) sampled by next-event estimation.
+    let emitterBuffer: MTLBuffer
+    let emitterCount: Int
 
     let instanceCount: Int
     let triangleCount: Int
@@ -185,13 +188,52 @@ enum AccelerationStructureBuilder {
 
         print("Scene built: \(instanceCount) chunks, \(totalTriangles) triangles.")
 
+        // --- 5. Gather emissive blocks as sphere lights for next-event estimation ----
+        let emitters = gatherEmitters(world: world)
+        let emitterCount = emitters.count
+        // Always allocate at least one element so the buffer is never zero-length.
+        let emitterUpload = emitters.isEmpty
+            ? [GPUEmitter(position: .zero, radius: 0.001, emission: .zero)]
+            : emitters
+        guard let emitterBuffer = device.makeBuffer(bytes: emitterUpload,
+                                                    length: emitterUpload.count * MemoryLayout<GPUEmitter>.stride,
+                                                    options: .storageModeShared) else {
+            fatalError("Failed to allocate emitter buffer.")
+        }
+        print("Emitters gathered: \(emitterCount) emissive blocks.")
+
         return Scene(tlas: tlas,
                      blases: blases,
                      primitiveBuffer: primitiveBuffer,
                      instanceOffsetBuffer: instanceOffsetBuffer,
                      materialBuffer: materialBuffer,
+                     emitterBuffer: emitterBuffer,
+                     emitterCount: emitterCount,
                      instanceCount: instanceCount,
                      triangleCount: totalTriangles)
+    }
+
+    /// Scans the world for emissive voxels and turns each into a spherical light.
+    private static func gatherEmitters(world: VoxelWorld) -> [GPUEmitter] {
+        var emissionByRaw = [SIMD3<Float>](repeating: .zero, count: 256)
+        for type in BlockType.allCases {
+            emissionByRaw[Int(type.rawValue)] = type.material.emission
+        }
+        var emitters: [GPUEmitter] = []
+        for z in 0..<world.sizeZ {
+            for y in 0..<world.sizeY {
+                for x in 0..<world.sizeX {
+                    let e = emissionByRaw[Int(world.block(x, y, z).rawValue)]
+                    if e != .zero {
+                        emitters.append(GPUEmitter(
+                            position: SIMD3(Float(x) + 0.5, Float(y) + 0.5, Float(z) + 0.5),
+                            radius: 0.55,
+                            emission: e))
+                    }
+                }
+            }
+        }
+        return emitters
     }
 
     /// Builds a 3×4 affine transform (column-major) that is pure translation.
