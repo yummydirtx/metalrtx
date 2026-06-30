@@ -24,6 +24,7 @@ final class ControlsPanel {
     private var denoiseToggle: NSButton!
     private var flashlightToggle: NSButton!
     private var freezeFlashlightToggle: NSButton!
+    private var fogToggle: NSButton!
 
     // Collapsible water section.
     private var waterHeader: NSButton!
@@ -101,6 +102,16 @@ final class ControlsPanel {
             self?.freezeFlashlightToggle.state = frozen ? .on : .off
         }
 
+        fogToggle = NSButton(checkboxWithTitle: "Beam Fog",
+                             target: self, action: #selector(fogToggled(_:)))
+        fogToggle.state = (renderer?.fogOn ?? false) ? .on : .off
+        content.addSubview(fogToggle)
+
+        // Keep the fog checkbox in sync if the fog is toggled elsewhere.
+        renderer?.onFogChanged = { [weak self] on in
+            self?.fogToggle.state = on ? .on : .off
+        }
+
         // Collapsible water section header (disclosure-style button).
         waterHeader = NSButton(title: waterHeaderTitle,
                                target: self, action: #selector(toggleWater(_:)))
@@ -160,7 +171,7 @@ final class ControlsPanel {
     // MARK: - Layout
 
     private var collapsedHeight: CGFloat {
-        topPad + 4 * rowHeight + 2 * toggleHeight + headerHeight + tailGap
+        topPad + 4 * rowHeight + 3 * toggleHeight + headerHeight + tailGap
     }
 
     private var expandedHeight: CGFloat {
@@ -203,6 +214,9 @@ final class ControlsPanel {
         y -= toggleHeight
 
         freezeFlashlightToggle.frame = NSRect(x: 16, y: y - 2, width: 200, height: 20)
+        y -= toggleHeight
+
+        fogToggle.frame = NSRect(x: 16, y: y - 2, width: 200, height: 20)
         y -= toggleHeight
 
         waterHeader.frame = NSRect(x: 14, y: y - 2, width: 160, height: 20)
@@ -286,6 +300,10 @@ final class ControlsPanel {
 
     @objc private func freezeFlashlightToggled(_ sender: NSButton) {
         renderer?.flashlightFrozen = (sender.state == .on)
+    }
+
+    @objc private func fogToggled(_ sender: NSButton) {
+        renderer?.fogOn = (sender.state == .on)
     }
 
     private func refreshReadouts() {

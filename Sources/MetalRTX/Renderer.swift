@@ -60,6 +60,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     var denoiseEnabled = true { didSet { settingsDirty = true } }
     var sunStrength: Float = 11 { didSet { settingsDirty = true } }
     var flashlightOn = false { didSet { settingsDirty = true; onFlashlightChanged?(flashlightOn) } }
+    /// When true a thin volumetric fog is enabled so the flashlight beam cone is visible.
+    var fogOn = false { didSet { settingsDirty = true; onFogChanged?(fogOn) } }
     /// When true the flashlight stays pinned at its world pose while the player moves freely.
     var flashlightFrozen = false {
         didSet {
@@ -77,6 +79,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     var onFlashlightChanged: ((Bool) -> Void)?
     /// Notifies observers when the flashlight freeze is toggled via the keyboard.
     var onFlashlightFrozenChanged: ((Bool) -> Void)?
+    /// Notifies observers when the volumetric fog is toggled.
+    var onFogChanged: ((Bool) -> Void)?
     private var settingsDirty = true
 
     init(view: GameView, device: MTLDevice) {
@@ -337,7 +341,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             height: height,
             flashlightEnabled: flashlightOn ? 1 : 0,
             flashlightPos: PackedFloat3(flashlightFrozen ? frozenFlashlightPos : flashlightOrigin()),
-            flashlightDir: PackedFloat3(flashlightFrozen ? frozenFlashlightDir : normalize(camera.forward))
+            flashlightDir: PackedFloat3(flashlightFrozen ? frozenFlashlightDir : normalize(camera.forward)),
+            fogEnabled: fogOn ? 1 : 0
         )
     }
 

@@ -67,7 +67,7 @@ struct CameraUniforms {
     var accumulatedFrames: UInt32
 }
 
-/// Mirrors `RenderSettings` (104 bytes).
+/// Mirrors `RenderSettings` (108 bytes).
 struct RenderSettings {
     var sunDirection: PackedFloat3
     var sunIntensity: Float
@@ -87,4 +87,5 @@ struct RenderSettings {
     var flashlightEnabled: UInt32
     var flashlightPos: PackedFloat3
     var flashlightDir: PackedFloat3
+    var fogEnabled: UInt32
 }

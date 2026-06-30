@@ -224,6 +224,67 @@ inline float3 shadeFlashlight(instance_acceleration_structure tlas,
     return col;
 }
 
+// Volumetric in-scatter of the flashlight beam through a thin fog. Ray-marches the
+// view ray and accumulates light scattered toward the camera from inside the cone,
+// shadow-testing each in-cone sample so the shaft is occluded by world geometry.
+// Makes the beam itself visible as a soft cone of light. `tMax` is the depth of the
+// nearest opaque surface (so the fog does not bleed past walls).
+inline float3 flashlightVolumetric(instance_acceleration_structure tlas,
+                                   constant RenderSettings &s,
+                                   float3 ro, float3 rd, float tMax,
+                                   thread uint &seed) {
+    if (s.flashlightEnabled == 0u || s.fogEnabled == 0u) return float3(0.0f);
+
+    float3 lpos = float3(s.flashlightPos);
+    float3 ldir = normalize(float3(s.flashlightDir));
+    const float cosInner = 0.965f;
+    const float cosOuter = 0.90f;
+    const float range = 110.0f;
+
+    float marchEnd = min(tMax, range);
+    if (marchEnd <= 1e-3f) return float3(0.0f);
+
+    const int STEPS = 32;
+    float dt = marchEnd / float(STEPS);
+    float jitter = randFloat(seed);          // break up slice banding
+
+    // Henyey-Greenstein forward scatter makes the cone read more like a beam.
+    float g = 0.35f;
+    float g2 = g * g;
+
+    const float3 color = float3(1.0f, 0.95f, 0.86f);
+    const float intensity = 16.0f;
+    const float scatter = 0.012f;            // very slight fog density
+
+    float3 accum = float3(0.0f);
+    for (int i = 0; i < STEPS; ++i) {
+        float t = (float(i) + jitter) * dt;
+        float3 X = ro + rd * t;
+        float3 toL = lpos - X;
+        float dist = length(toL);
+        if (dist < 1e-4f) continue;
+        float3 L = toL / dist;
+
+        float spotCos = dot(-L, ldir);
+        float spot = smoothstep(cosOuter, cosInner, spotCos);
+        if (spot <= 0.0f) continue;          // outside the cone: skip the shadow ray
+
+        float atten = 1.0f / (1.0f + 0.012f * dist * dist);
+        atten *= clamp(1.0f - dist / range, 0.0f, 1.0f);
+        if (atten <= 0.0f) continue;
+
+        // True volumetric shadow: only lit if the bulb can see this point.
+        if (traceShadow(tlas, X, L, dist - 2e-3f)) continue;
+
+        float cosTheta = dot(rd, -L);
+        float phase = (1.0f - g2) /
+                      (4.0f * M_PI_F * pow(1.0f + g2 - 2.0f * g * cosTheta, 1.5f));
+
+        accum += spot * atten * phase;
+    }
+    return accum * color * intensity * scatter * dt;
+}
+
 // Traces a single Monte-Carlo sub-path starting at (ro, rd) and returns the
 // radiance it carries back. This is the shared body used both for the camera
 // path and for the reflection / refraction sub-paths spawned by the primary
@@ -496,6 +557,9 @@ kernel void pathTrace(instance_acceleration_structure tlas        [[buffer(0)]],
                                       primHitT, seed);
         }
     }
+
+    // Volumetric in-scatter of the flashlight beam through the thin fog (if enabled).
+    radiance += flashlightVolumetric(tlas, settings, ro, rd, gViewZ, seed);
 
     // Clamp the worst fireflies before they enter the denoiser.
     radiance = min(radiance, float3(48.0f));

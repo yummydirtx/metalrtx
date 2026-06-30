@@ -54,6 +54,7 @@ struct RenderSettings {
     uint  flashlightEnabled;    // 1 = camera flashlight on
     packed_float3 flashlightPos; // world-space light position (camera)
     packed_float3 flashlightDir; // normalized aim direction (camera forward)
+    uint  fogEnabled;           // 1 = thin volumetric fog so the beam cone is visible
 };
 
 // ---- Material (must match ShaderTypes.swift) --------------------------------
