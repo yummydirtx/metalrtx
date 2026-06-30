@@ -1,3 +1,76 @@
-# Metal RTX
+# Metal RTX — Voxel Path Tracer
 
-A beautiful RTX tech demo for M-series Macs.
+A real-time, hardware-ray-traced voxel tech demo for Apple-silicon Macs, written in
+Swift with the Metal raytracing API. It renders a procedurally generated Minecraft-style
+world with a full day/night sun cycle, emissive lanterns/glowstone, reflective and
+refractive water, and a real-time path tracer with temporal + edge-avoiding à-trous
+denoising.
+
+![Daytime](docs/day.png)
+![Night](docs/night.png)
+
+## Features
+
+- **Hardware ray tracing** via Metal `intersector<triangle_data, instancing>` on the GPU.
+- **Voxel world** — procedurally generated terrain (FBM value-noise heightmap), trees,
+  beaches, snow caps, and scattered light sources, greedy-meshed into triangles.
+- **Instanced acceleration structures** — one triangle BLAS per chunk under an instanced
+  TLAS (32 chunks, ~53k triangles).
+- **Physically based path tracing** — diffuse (with sun next-event estimation), metals
+  (GGX), and dielectric glass/water (Fresnel reflect/refract with transmission tint).
+- **Animated, reflective water** — wave-perturbed normals with live roughness control.
+- **Day/night sun cycle** — analytic sky with sunrise/sunset warmth, a sun disk, and a
+  starfield at night; emissive blocks light the world after dark.
+- **Real-time denoising** — temporal reprojection (world-space + normal + material
+  validation) followed by a 3-iteration edge-avoiding à-trous filter, so the 1-spp image
+  resolves to a clean result.
+- **Free-fly camera** and a floating **HUD controls panel** for live tweaking.
+
+## Requirements
+
+- Apple-silicon Mac with a GPU that supports hardware ray tracing (**M3 or newer**
+  recommended; requires `MTLDevice.supportsRaytracing`).
+- **macOS 15** or newer.
+- **Swift 6** toolchain (Xcode 16 / Swift 6).
+
+## Build & Run
+
+```sh
+swift run -c release MetalRTX
+```
+
+The app opens a render window plus a floating **Controls** panel.
+
+## Controls
+
+| Input | Action |
+| --- | --- |
+| `W` `A` `S` `D` | Move horizontally |
+| `Q` / `E` | Move down / up |
+| `Space` / `Shift` | Move up / down |
+| Mouse | Look (click the window to capture the cursor) |
+| `Esc` | Release the mouse cursor |
+| `Cmd-Q` | Quit |
+
+The Controls panel exposes live sliders for **Time of Day**, **Exposure**,
+**Sun Strength**, **Max Bounces**, and **Water Roughness**, plus a **Denoiser** toggle.
+
+## Project layout
+
+```
+Sources/MetalRTX/
+  main.swift, AppDelegate.swift, GameView.swift   App shell (programmatic AppKit)
+  Renderer.swift, Camera.swift                    Render loop + camera
+  Controls/ControlsPanel.swift                    Live HUD controls
+  Metal/                                          Device setup, pipelines, shader library
+  World/                                          Voxel storage, terrain, greedy mesher
+  Shaders/                                         Metal shaders (path trace, denoise, sky…)
+```
+
+Shaders are compiled at runtime from the bundled `.metal` sources. They can be validated
+offline with:
+
+```sh
+cat Sources/MetalRTX/Shaders/{Common,Sky,PathTrace,Denoise,Tonemap,Blit}.metal > /tmp/all.metal
+xcrun -sdk macosx metal -std=metal3.2 -c /tmp/all.metal -o /dev/null
+```
