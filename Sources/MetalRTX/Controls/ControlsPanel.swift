@@ -24,7 +24,7 @@ final class ControlsPanel {
 
     private func build() {
         let width: CGFloat = 300
-        let rect = NSRect(x: 0, y: 0, width: width, height: 340)
+        let rect = NSRect(x: 0, y: 0, width: width, height: 384)
         panel = NSPanel(
             contentRect: rect,
             styleMask: [.titled, .closable, .utilityWindow, .hudWindow, .nonactivatingPanel],
@@ -91,7 +91,7 @@ final class ControlsPanel {
 
         let toggle = NSButton(checkboxWithTitle: "Denoiser",
                               target: self, action: #selector(denoiseToggled(_:)))
-        toggle.frame = NSRect(x: 16, y: y, width: 160, height: 20)
+        toggle.frame = NSRect(x: 16, y: 48, width: 160, height: 20)
         toggle.state = (renderer?.denoiseEnabled ?? true) ? .on : .off
         content.addSubview(toggle)
 

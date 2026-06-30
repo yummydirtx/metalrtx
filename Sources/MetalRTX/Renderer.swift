@@ -30,6 +30,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var posTex: MTLTexture?            // xyz world position, w material id
     private var prevPosTex: MTLTexture?
     private var prevNormalTex: MTLTexture?
+    private var reflPosTex: MTLTexture?        // xyz virtual reflected pos, w valid flag
+    private var prevReflPosTex: MTLTexture?
     private var histColor: [MTLTexture?] = [nil, nil]   // ping-pong across frames
     private var atrousTex: [MTLTexture?] = [nil, nil]   // ping-pong within a frame
     private var outputTexture: MTLTexture?     // tone-mapped LDR (shared, readable)
@@ -112,6 +114,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         guard let colorTex, let normalDepthTex, let posTex,
               let prevPosTex, let prevNormalTex, let output = outputTexture,
+              let reflPosTex, let prevReflPosTex,
               let histPrev = histColor[frameParity],
               let histCurr = histColor[1 - frameParity],
               let atrous0 = atrousTex[0], let atrous1 = atrousTex[1] else { return }
@@ -151,6 +154,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             encoder.setTexture(colorTex, index: 0)
             encoder.setTexture(normalDepthTex, index: 1)
             encoder.setTexture(posTex, index: 2)
+            encoder.setTexture(reflPosTex, index: 3)
             for blas in scene.blases { encoder.useResource(blas, usage: .read) }
             dispatch(encoder, pipeline: pathTracePipeline, width: width, height: height)
             encoder.endEncoding()
@@ -169,7 +173,10 @@ final class Renderer: NSObject, MTKViewDelegate {
                 encoder.setTexture(prevNormalTex, index: 4)
                 encoder.setTexture(histPrev, index: 5)
                 encoder.setTexture(histCurr, index: 6)
+                encoder.setTexture(reflPosTex, index: 7)
+                encoder.setTexture(prevReflPosTex, index: 8)
                 encoder.setBytes(&uniforms, length: MemoryLayout<CameraUniforms>.stride, index: 0)
+                encoder.setBuffer(scene.materialBuffer, offset: 0, index: 1)
                 dispatch(encoder, pipeline: temporalPipeline, width: width, height: height)
                 encoder.endEncoding()
             }
@@ -186,6 +193,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                     encoder.setTexture(posTex, index: 2)
                     encoder.setTexture(dst, index: 3)
                     encoder.setBytes(&step, length: MemoryLayout<UInt32>.stride, index: 0)
+                    encoder.setBuffer(scene.materialBuffer, offset: 0, index: 1)
                     dispatch(encoder, pipeline: atrousPipeline, width: width, height: height)
                     encoder.endEncoding()
                 }
@@ -211,6 +219,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             blit.copy(from: output, to: drawable.texture)
             blit.copy(from: posTex, to: prevPosTex)
             blit.copy(from: normalDepthTex, to: prevNormalTex)
+            blit.copy(from: reflPosTex, to: prevReflPosTex)
             blit.endEncoding()
         }
 
@@ -265,6 +274,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         posTex = make(.rgba32Float, "WorldPosMatId")
         prevPosTex = make(.rgba32Float, "PrevWorldPos")
         prevNormalTex = make(.rgba16Float, "PrevNormal")
+        reflPosTex = make(.rgba32Float, "ReflVirtualPos")
+        prevReflPosTex = make(.rgba32Float, "PrevReflVirtualPos")
         histColor = [make(.rgba16Float, "HistColorA"), make(.rgba16Float, "HistColorB")]
         atrousTex = [make(.rgba16Float, "AtrousA"), make(.rgba16Float, "AtrousB")]
         outputTexture = make(.bgra8Unorm, shared: true, "OutputLDR")
