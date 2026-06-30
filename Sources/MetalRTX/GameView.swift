@@ -13,6 +13,17 @@ final class GameView: MTKView {
     /// Whether the cursor is captured for mouse-look.
     private var mouseCaptured = false
 
+    /// Set when the player double-taps space (Minecraft-style flight toggle); consumed by the renderer.
+    private var flightTogglePending = false
+    /// Set when the player presses F to toggle the flashlight; consumed by the renderer.
+    private var flashlightTogglePending = false
+    /// Set when the player presses R to freeze/unfreeze the flashlight; consumed by the renderer.
+    private var freezeFlashlightTogglePending = false
+    /// Timestamp of the last discrete space press, for double-tap detection.
+    private var lastSpaceTap: TimeInterval = 0
+    /// Maximum gap between two space taps to count as a double-tap.
+    private let doubleTapWindow: TimeInterval = 0.3
+
     init(frame: CGRect, device: MTLDevice) {
         super.init(frame: frame, device: device)
         self.colorPixelFormat = .bgra8Unorm
@@ -39,12 +50,48 @@ final class GameView: MTKView {
         return delta
     }
 
+    /// Returns whether a flight-toggle (double-tap space) occurred since the last call, clearing it.
+    func consumeFlightToggle() -> Bool {
+        defer { flightTogglePending = false }
+        return flightTogglePending
+    }
+
+    /// Returns whether the flashlight was toggled (F key) since the last call, clearing it.
+    func consumeFlashlightToggle() -> Bool {
+        defer { flashlightTogglePending = false }
+        return flashlightTogglePending
+    }
+
+    /// Returns whether the flashlight freeze was toggled (R key) since the last call, clearing it.
+    func consumeFreezeFlashlightToggle() -> Bool {
+        defer { freezeFlashlightTogglePending = false }
+        return freezeFlashlightTogglePending
+    }
+
     // MARK: - Keyboard
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { // Escape releases the mouse
             releaseMouse()
             return
+        }
+        // Detect a double-tap of the space bar to toggle flight (ignoring key-repeat events).
+        if event.keyCode == 49 && !event.isARepeat {
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastSpaceTap <= doubleTapWindow {
+                flightTogglePending = true
+                lastSpaceTap = 0
+            } else {
+                lastSpaceTap = now
+            }
+        }
+        // F toggles the flashlight.
+        if event.keyCode == 3 && !event.isARepeat {
+            flashlightTogglePending = true
+        }
+        // R freezes / unfreezes the flashlight in place.
+        if event.keyCode == 15 && !event.isARepeat {
+            freezeFlashlightTogglePending = true
         }
         if let chars = event.charactersIgnoringModifiers?.lowercased() {
             pressedKeys.insert(chars)

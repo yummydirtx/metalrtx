@@ -24,7 +24,7 @@ denoising.
 - **Real-time denoising** — temporal reprojection (world-space + normal + material
   validation) followed by a 3-iteration edge-avoiding à-trous filter, so the 1-spp image
   resolves to a clean result.
-- **Free-fly camera** and a floating **HUD controls panel** for live tweaking.
+- **Free-fly / walk camera** (double-tap space to toggle gravity + collision) and a floating **HUD controls panel** for live tweaking.
 
 ## Requirements
 
@@ -46,8 +46,10 @@ The app opens a render window plus a floating **Controls** panel.
 | Input | Action |
 | --- | --- |
 | `W` `A` `S` `D` | Move horizontally |
-| `Q` / `E` | Move down / up |
-| `Space` / `Shift` | Move up / down |
+| `Q` / `E` | Fly down / up (flying mode) |
+| `Space` / `Shift` | Fly up / down (flying mode) |
+| Double-tap `Space` | Toggle flying / walking (gravity + collision) |
+| `Space` | Jump (walking mode) |
 | Mouse | Look (click the window to capture the cursor) |
 | `Esc` | Release the mouse cursor |
 | `Cmd-Q` | Quit |

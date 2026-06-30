@@ -54,8 +54,29 @@ final class Renderer: NSObject, MTKViewDelegate {
     var exposure: Float = 1.3 { didSet { settingsDirty = true } }
     var maxBounces: UInt32 = 5 { didSet { settingsDirty = true } }
     var waterRoughness: Float = 0.0 { didSet { settingsDirty = true } }
+    var waveAmplitude: Float = 0.16 { didSet { settingsDirty = true } }
+    var waveChoppiness: Float = 0.85 { didSet { settingsDirty = true } }
+    var waveSpeed: Float = 0.55 { didSet { settingsDirty = true } }
     var denoiseEnabled = true { didSet { settingsDirty = true } }
     var sunStrength: Float = 11 { didSet { settingsDirty = true } }
+    var flashlightOn = false { didSet { settingsDirty = true; onFlashlightChanged?(flashlightOn) } }
+    /// When true the flashlight stays pinned at its world pose while the player moves freely.
+    var flashlightFrozen = false {
+        didSet {
+            if flashlightFrozen {
+                frozenFlashlightPos = flashlightOrigin()
+                frozenFlashlightDir = normalize(camera.forward)
+            }
+            settingsDirty = true
+            onFlashlightFrozenChanged?(flashlightFrozen)
+        }
+    }
+    private var frozenFlashlightPos = SIMD3<Float>(0, 0, 0)
+    private var frozenFlashlightDir = SIMD3<Float>(0, 0, -1)
+    /// Notifies observers (e.g. the controls panel) when the flashlight is toggled via the keyboard.
+    var onFlashlightChanged: ((Bool) -> Void)?
+    /// Notifies observers when the flashlight freeze is toggled via the keyboard.
+    var onFlashlightFrozenChanged: ((Bool) -> Void)?
     private var settingsDirty = true
 
     init(view: GameView, device: MTLDevice) {
@@ -85,6 +106,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                                   Float(world.seaLevel) + 22,
                                   Float(world.sizeZ) * 0.5)
         let cam = Camera(position: center + SIMD3(-40, 8, 40), yaw: -0.7, pitch: -0.18)
+        cam.world = world
         self.camera = cam
 
         super.init()
@@ -127,6 +149,15 @@ final class Renderer: NSObject, MTKViewDelegate {
         let gameView = view as? GameView
         let keys = gameView?.pressedKeys ?? []
         let mouseDelta = gameView?.consumeMouseDelta() ?? .zero
+        if gameView?.consumeFlightToggle() == true {
+            camera.toggleFlight()
+        }
+        if gameView?.consumeFlashlightToggle() == true {
+            flashlightOn.toggle()
+        }
+        if gameView?.consumeFreezeFlashlightToggle() == true {
+            flashlightFrozen.toggle()
+        }
         let moved = camera.update(deltaTime: dt, pressedKeys: keys, mouseDelta: mouseDelta)
 
         if moved || settingsDirty {
@@ -298,10 +329,26 @@ final class Renderer: NSObject, MTKViewDelegate {
             maxBounces: maxBounces,
             denoiseEnabled: denoiseEnabled ? 1 : 0,
             waterRoughness: waterRoughness,
+            waveAmplitude: waveAmplitude,
+            waveChoppiness: waveChoppiness,
+            waveSpeed: waveSpeed,
             elapsedTime: Float(CACurrentMediaTime() - startTime),
             width: width,
-            height: height
+            height: height,
+            flashlightEnabled: flashlightOn ? 1 : 0,
+            flashlightPos: PackedFloat3(flashlightFrozen ? frozenFlashlightPos : flashlightOrigin()),
+            flashlightDir: PackedFloat3(flashlightFrozen ? frozenFlashlightDir : normalize(camera.forward))
         )
+    }
+
+    /// World-space origin of the flashlight, offset from the eye toward where a hand would
+    /// hold it (down and to the right, slightly forward) so the beam and its glints come
+    /// from below the view rather than straight from the eyes.
+    private func flashlightOrigin() -> SIMD3<Float> {
+        camera.position
+            + camera.right * 0.35
+            - camera.up * 0.45
+            + camera.forward * 0.20
     }
 
     /// Computes the sun's direction, color, and intensity from the time of day.

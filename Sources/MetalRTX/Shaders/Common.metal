@@ -45,9 +45,15 @@ struct RenderSettings {
     uint  maxBounces;
     uint  denoiseEnabled;
     float waterRoughness;
+    float waveAmplitude;        // master Gerstner wave steepness
+    float waveChoppiness;       // horizontal sharpening (Gerstner q)
+    float waveSpeed;            // wave animation time scale
     float elapsedTime;          // seconds, drives water animation
     uint  width;
     uint  height;
+    uint  flashlightEnabled;    // 1 = camera flashlight on
+    packed_float3 flashlightPos; // world-space light position (camera)
+    packed_float3 flashlightDir; // normalized aim direction (camera forward)
 };
 
 // ---- Material (must match ShaderTypes.swift) --------------------------------

@@ -20,9 +20,9 @@ final class VoxelWorld {
     private var blocks: [UInt8]
 
     init(chunkSize: Int = 32,
-         chunksX: Int = 4,
+         chunksX: Int = 6,
          chunksY: Int = 3,
-         chunksZ: Int = 4,
+         chunksZ: Int = 6,
          seaLevel: Int = 34) {
         self.chunkSize = chunkSize
         self.chunksX = chunksX

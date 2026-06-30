@@ -24,6 +24,206 @@ inline bool traceShadow(instance_acceleration_structure tlas,
     return hit.type != intersection_type::none;
 }
 
+// Direct lighting from the camera-mounted flashlight: a soft-edged spotlight at the
+// camera position aimed along its forward axis. Returns the (unshadowed-if-visible)
+// diffuse contribution for a hit point, or zero when disabled / outside the cone.
+inline float3 flashlightDirect(instance_acceleration_structure tlas,
+                               constant RenderSettings &s,
+                               float3 P, float3 Ns, float3 albedo) {
+    if (s.flashlightEnabled == 0u) return float3(0.0f);
+
+    float3 lpos = float3(s.flashlightPos);
+    float3 ldir = normalize(float3(s.flashlightDir));
+    float3 toL = lpos - P;
+    float dist = length(toL);
+    if (dist < 1e-4f) return float3(0.0f);
+    float3 L = toL / dist;
+
+    float NdotL = max(dot(Ns, L), 0.0f);
+    if (NdotL <= 0.0f) return float3(0.0f);
+
+    // Spot cone: full brightness inside the inner angle, feathered to the outer angle.
+    float spotCos = dot(-L, ldir);
+    const float cosInner = 0.965f;   // ~15 degrees
+    const float cosOuter = 0.90f;    // ~26 degrees
+    float spot = smoothstep(cosOuter, cosInner, spotCos);
+    if (spot <= 0.0f) return float3(0.0f);
+
+    // Inverse-square falloff with a soft range cutoff so it fades out naturally.
+    const float range = 110.0f;
+    float atten = 1.0f / (1.0f + 0.012f * dist * dist);
+    atten *= clamp(1.0f - dist / range, 0.0f, 1.0f);
+    if (atten <= 0.0f) return float3(0.0f);
+
+    // Shadow test toward the light.
+    float3 origin = P + Ns * 1e-3f;
+    if (traceShadow(tlas, origin, L, dist - 2e-3f)) return float3(0.0f);
+
+    const float3 color = float3(1.0f, 0.95f, 0.86f);
+    const float intensity = 16.0f;
+    return albedo * INV_PI * color * intensity * NdotL * spot * atten;
+}
+
+// Visible response of a water surface to the camera flashlight. Because the light is
+// Visible response of a water surface to the camera flashlight. A specular reflection of
+// the bulb is NOT the right model here: the light is at the eye, so its mirror reflection
+// only lands straight down at your feet (never in the middle of the lake) — unlike the moon,
+// which is at infinity and streaks to the horizon. What you actually see when you shine a
+// flashlight into water is the beam ENTERING and scattering within it: a soft, water-tinted
+// glow that is strongest exactly where you look down into the surface (high transmission),
+// plus a faint Fresnel sparkle off grazing wavelets. `rd` is the incoming view ray; `Ns` is
+// the wave-perturbed normal.
+inline float3 flashlightWater(instance_acceleration_structure tlas,
+                              constant RenderSettings &s,
+                              float3 P, float3 Ns, float3 rd) {
+    if (s.flashlightEnabled == 0u) return float3(0.0f);
+
+    float3 lpos = float3(s.flashlightPos);
+    float3 ldir = normalize(float3(s.flashlightDir));
+    float3 toL = lpos - P;
+    float dist = length(toL);
+    if (dist < 1e-4f) return float3(0.0f);
+    float3 L = toL / dist;
+
+    // Spot cone gate (the lit point must be inside the beam).
+    float spotCos = dot(-L, ldir);
+    const float cosInner = 0.965f;   // ~15 degrees
+    const float cosOuter = 0.86f;    // ~31 degrees, soft edge
+    float spot = smoothstep(cosOuter, cosInner, spotCos);
+    if (spot <= 0.0f) return float3(0.0f);
+
+    // The beam must hit the top of the water surface.
+    float NdotL = max(dot(Ns, L), 0.0f);
+    if (NdotL <= 0.0f) return float3(0.0f);
+
+    // Inverse-square-ish falloff with a soft range cutoff.
+    const float range = 160.0f;
+    float atten = 1.0f / (1.0f + 0.006f * dist * dist);
+    atten *= clamp(1.0f - dist / range, 0.0f, 1.0f);
+    if (atten <= 0.0f) return float3(0.0f);
+
+    // The surface point must actually see the light.
+    float3 origin = P + Ns * 1e-3f;
+    if (traceShadow(tlas, origin, L, dist - 2e-3f)) return float3(0.0f);
+
+    float3 V = -rd;                                  // surface -> eye
+
+    // Transmission: how much we see INTO the water (Schlick, ~98% looking straight down,
+    // dropping at grazing where the surface turns mirror-like). The beam that gets through
+    // scatters off particulate / the lakebed and glows back up to the eye.
+    float cosV = clamp(dot(Ns, V), 0.0f, 1.0f);
+    float fresV = 0.02f + 0.98f * pow(1.0f - cosV, 5.0f);
+    float transmit = 1.0f - fresV;
+    const float3 scatterTint = float3(0.05f, 0.22f, 0.30f);   // murky blue-green water
+    float3 glow = scatterTint * (transmit * NdotL);
+
+    // Faint surface sparkle: a Fresnel-weighted highlight off grazing wavelets so the beam
+    // also throws a few lively glints on the surface without washing it out.
+    float3 H = normalize(L + V);
+    float NdotH = max(dot(Ns, H), 0.0f);
+    float fresH = 0.02f + 0.98f * pow(1.0f - max(dot(V, H), 0.0f), 5.0f);
+    float3 sparkle = float3(1.0f, 0.97f, 0.9f) * (pow(NdotH, 80.0f) * fresH);
+
+    const float glowStrength = 10.0f;
+    const float sparkleStrength = 6.0f;
+    return (glow * glowStrength + sparkle * sparkleStrength) * spot * atten;
+}
+
+// -----------------------------------------------------------------------------
+// Visible flashlight body. The light is otherwise an invisible point source, so
+// we draw a small analytic prop (a capped cylinder with an emissive lens) at the
+// flashlight origin, aimed along its beam. It is intersected directly by the
+// primary camera ray — when held it reads as a viewmodel in the lower view, and
+// when frozen it stays put in the world. `flashlightPos`/`flashlightDir` already
+// hold the live hand pose or the frozen pose, so this follows both automatically.
+struct FlashlightHit {
+    bool   hit;
+    float  t;
+    float3 normal;
+    bool   isLens;   // front face that glows when the light is on
+};
+
+inline FlashlightHit intersectFlashlight(constant RenderSettings &s, float3 ro, float3 rd) {
+    FlashlightHit res;
+    res.hit = false;
+    res.t = 1.0e30f;
+    res.normal = float3(0.0f, 1.0f, 0.0f);
+    res.isLens = false;
+
+    float3 axis = normalize(float3(s.flashlightDir));   // points out the lens
+    float3 front = float3(s.flashlightPos);             // lens center
+    const float bodyLen = 0.17f;
+    const float radius = 0.035f;
+    float3 back = front - axis * bodyLen;               // tail end
+
+    // ---- Side wall: ray vs finite cylinder (infinite solve, clamped to length).
+    float3 ba = front - back;
+    float baLen2 = dot(ba, ba);
+    float3 oc = ro - back;
+    float baoc = dot(ba, oc);
+    float bard = dot(ba, rd);
+    float a = baLen2 - bard * bard;
+    float b = baLen2 * dot(oc, rd) - baoc * bard;
+    float c = baLen2 * dot(oc, oc) - baoc * baoc - radius * radius * baLen2;
+    float disc = b * b - a * c;
+    if (disc >= 0.0f && fabs(a) > 1e-9f) {
+        float sq = sqrt(disc);
+        float t = (-b - sq) / a;
+        float y = baoc + t * bard;
+        if (t > 1e-3f && t < res.t && y >= 0.0f && y <= baLen2) {
+            res.hit = true;
+            res.t = t;
+            float3 p = ro + rd * t;
+            res.normal = normalize((p - back) - ba * (y / baLen2));
+            res.isLens = false;
+        }
+    }
+
+    // ---- End caps: front lens disc and back disc.
+    float3 capC[2] = { front, back };
+    float3 capN[2] = { axis, -axis };
+    for (int cap = 0; cap < 2; ++cap) {
+        float denom = dot(rd, capN[cap]);
+        if (fabs(denom) > 1e-6f) {
+            float t = dot(capC[cap] - ro, capN[cap]) / denom;
+            if (t > 1e-3f && t < res.t) {
+                float3 p = ro + rd * t;
+                if (length(p - capC[cap]) <= radius) {
+                    res.hit = true;
+                    res.t = t;
+                    res.normal = capN[cap];
+                    res.isLens = (cap == 0);
+                }
+            }
+        }
+    }
+    return res;
+}
+
+// Shades the flashlight prop: a glowing lens when lit, otherwise a dark gunmetal
+// body with simple sun + ambient lighting (and a sun shadow test against the world).
+inline float3 shadeFlashlight(instance_acceleration_structure tlas,
+                              constant RenderSettings &s,
+                              float3 sunDir, float3 P, float3 Ns, bool isLens) {
+    if (isLens) {
+        if (s.flashlightEnabled != 0u) {
+            return float3(1.0f, 0.95f, 0.86f) * 7.0f;   // bright emissive lens
+        }
+        return float3(0.03f, 0.035f, 0.04f);            // dark glass when off
+    }
+
+    const float3 albedo = float3(0.06f, 0.065f, 0.075f); // dark gunmetal
+    float3 col = albedo * 0.20f;                         // sky ambient term
+    float NdotL = max(dot(Ns, sunDir), 0.0f);
+    if (NdotL > 0.0f) {
+        float3 o = P + Ns * 1e-3f;
+        if (!traceShadow(tlas, o, sunDir, 1e4f)) {
+            col += albedo * INV_PI * sunRadiance(s) * NdotL;
+        }
+    }
+    return col;
+}
+
 // Traces a single Monte-Carlo sub-path starting at (ro, rd) and returns the
 // radiance it carries back. This is the shared body used both for the camera
 // path and for the reflection / refraction sub-paths spawned by the primary
@@ -79,7 +279,9 @@ inline float3 traceRadiance(instance_acceleration_structure tlas,
         if (mat.transparency > 0.5f) {
             if (mat.flags & MATERIAL_FLAG_WATER) {
                 float up = clamp(Ns.y, 0.0f, 1.0f);
-                float3 wn = waterNormal(hitP.xz, settings.elapsedTime, settings.waterRoughness);
+                float3 wn = waterNormal(hitP.xz, settings.elapsedTime,
+                                        settings.waveAmplitude, settings.waveChoppiness,
+                                        settings.waveSpeed, settings.waterRoughness);
                 Ns = normalize(mix(Ns, wn, up));
             }
 
@@ -94,6 +296,12 @@ inline float3 traceRadiance(instance_acceleration_structure tlas,
 
             float3 refr = refract(rd, Ns, eta);
             bool tir = dot(refr, refr) < 1e-6f;
+
+            // Flashlight response on this water surface (visible regardless of whether this
+            // sample reflects or refracts), evaluated as a Fresnel specular highlight.
+            if (mat.flags & MATERIAL_FLAG_WATER) {
+                radiance += throughput * flashlightWater(tlas, settings, hitP, Ns, rd);
+            }
 
             float3 newDir;
             if (tir || randFloat(seed) < fres) {
@@ -121,6 +329,7 @@ inline float3 traceRadiance(instance_acceleration_structure tlas,
                     radiance += throughput * albedo * INV_PI * sunRadiance(settings) * NdotL;
                 }
             }
+            radiance += throughput * flashlightDirect(tlas, settings, hitP, Ns, albedo);
             rd = cosineSampleHemisphere(Ns, rand2(seed));
             ro = hitP + Ns * 1e-3f;
             throughput *= albedo;
@@ -187,7 +396,21 @@ kernel void pathTrace(instance_acceleration_structure tlas        [[buffer(0)]],
     pr.max_distance = 1e4f;
     auto phit = isect.intersect(pr, tlas);
 
-    if (phit.type == intersection_type::none) {
+    // The flashlight prop is analytic geometry (not in the TLAS), so test it here
+    // against the primary ray and let it occlude the scene when it is in front.
+    FlashlightHit fl = intersectFlashlight(settings, ro, rd);
+    float sceneT = (phit.type == intersection_type::none) ? 1.0e30f : phit.distance;
+
+    if (fl.hit && fl.t < sceneT) {
+        float3 P = ro + rd * fl.t;
+        float3 Ns = fl.normal;
+        if (dot(Ns, rd) > 0.0f) Ns = -Ns;   // face the camera
+        radiance = shadeFlashlight(tlas, settings, sunDir, P, Ns, fl.isLens);
+        gNormal = Ns;
+        gPos = P;
+        gMaterialId = -2.0f;                 // distinct id keeps the denoiser from blending it
+        gViewZ = fl.t;
+    } else if (phit.type == intersection_type::none) {
         radiance = skyColor(rd, settings);
     } else {
         uint primIndex = instanceOffsets[phit.instance_id] + phit.primitive_id;
@@ -214,7 +437,9 @@ kernel void pathTrace(instance_acceleration_structure tlas        [[buffer(0)]],
             // grainy water noise, so it converges in a fraction of the samples.
             if (mat.flags & MATERIAL_FLAG_WATER) {
                 float up = clamp(Ns.y, 0.0f, 1.0f);
-                float3 wn = waterNormal(hitP.xz, settings.elapsedTime, settings.waterRoughness);
+                float3 wn = waterNormal(hitP.xz, settings.elapsedTime,
+                                        settings.waveAmplitude, settings.waveChoppiness,
+                                        settings.waveSpeed, settings.waterRoughness);
                 Ns = normalize(mix(Ns, wn, up));
             }
 
@@ -240,6 +465,10 @@ kernel void pathTrace(instance_acceleration_structure tlas        [[buffer(0)]],
                                               materials, settings, sunDir,
                                               reflO, refl, float3(1.0f), subBounces,
                                               reflHitT, seed);
+
+            // Explicit flashlight response on the water surface (point lights are never hit
+            // by the reflection ray, so this is what makes the beam visible on water).
+            radiance += flashlightWater(tlas, settings, hitP, Ns, rd);
 
             // Build the virtual reflected position by elongating the primary view
             // ray by the reflection's hit distance (P = O + V·(t_surface + t_refl)).

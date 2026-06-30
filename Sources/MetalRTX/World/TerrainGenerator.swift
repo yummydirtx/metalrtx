@@ -15,6 +15,14 @@ struct TerrainGenerator {
         // --- Heightmap via fractal value noise --------------------------------------
         var height = [Int](repeating: 0, count: w * d)
         let baseFreq: Float = 1.0 / 48.0
+        // Radial island mask: keep land near the world center and sink the terrain below
+        // sea level toward the edges so the island is ringed by open ocean all the way out
+        // to the render distance (the world bounds).
+        let centerX = Float(w) * 0.5
+        let centerZ = Float(d) * 0.5
+        let halfExtent = min(centerX, centerZ)
+        let islandCore = halfExtent * 0.42   // fully land within this radius
+        let islandEdge = halfExtent * 0.86   // fully ocean beyond this radius
         for z in 0..<d {
             for x in 0..<w {
                 let fx = Float(x)
@@ -22,6 +30,10 @@ struct TerrainGenerator {
                 var h = fbm(fx * baseFreq, fz * baseFreq, octaves: 5)   // 0..1
                 // Reshape: flatten lowlands, sharpen peaks for visual interest.
                 h = pow(h, 1.6)
+                // Shape the noise into an island that drops below sea level near the edges.
+                let r = sqrt((fx - centerX) * (fx - centerX) + (fz - centerZ) * (fz - centerZ))
+                let landMask = 1.0 - smoothstep(islandCore, islandEdge, r)
+                h *= landMask
                 let amplitude: Float = 38.0
                 let elevation = Float(sea) - 8.0 + h * amplitude
                 height[x + z * w] = Int(elevation.rounded())
@@ -144,6 +156,13 @@ struct TerrainGenerator {
         h = (h ^ (h >> 13)) &* 1274126177
         h = h ^ (h >> 16)
         return Float(h) / Float(UInt32.max)
+    }
+
+    /// Smooth Hermite interpolation between two edges, matching GLSL `smoothstep`.
+    @inline(__always)
+    private func smoothstep(_ edge0: Float, _ edge1: Float, _ x: Float) -> Float {
+        let t = simd_clamp((x - edge0) / (edge1 - edge0), 0, 1)
+        return t * t * (3 - 2 * t)
     }
 
     /// Smooth value noise in [0, 1).
