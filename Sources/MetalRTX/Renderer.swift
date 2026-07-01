@@ -57,11 +57,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     var waveAmplitude: Float = 0.16 { didSet { settingsDirty = true } }
     var waveChoppiness: Float = 0.85 { didSet { settingsDirty = true } }
     var waveSpeed: Float = 0.55 { didSet { settingsDirty = true } }
-    var denoiseEnabled = true { didSet { settingsDirty = true } }
+    var denoiseEnabled = false { didSet { settingsDirty = true } }
     var sunStrength: Float = 11 { didSet { settingsDirty = true } }
     var flashlightOn = false { didSet { settingsDirty = true; onFlashlightChanged?(flashlightOn) } }
     /// When true a thin volumetric fog is enabled so the flashlight beam cone is visible.
-    var fogOn = false { didSet { settingsDirty = true; onFogChanged?(fogOn) } }
+    var fogOn = true { didSet { settingsDirty = true; onFogChanged?(fogOn) } }
     /// When true the flashlight stays pinned at its world pose while the player moves freely.
     var flashlightFrozen = false {
         didSet {

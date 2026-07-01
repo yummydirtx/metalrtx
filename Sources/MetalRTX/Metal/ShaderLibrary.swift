@@ -18,7 +18,11 @@ enum ShaderLibrary {
     ]
 
     static func make(device: MTLDevice) -> MTLLibrary {
-        guard let shadersURL = Bundle.module.url(forResource: "Shaders", withExtension: nil) else {
+        // Prefer the standard app resource location (Contents/Resources), which is what a
+        // packaged, code-signed `.app` uses. Fall back to the SwiftPM resource bundle so
+        // `swift run` continues to work during development.
+        guard let shadersURL = Bundle.main.url(forResource: "Shaders", withExtension: nil)
+            ?? Bundle.module.url(forResource: "Shaders", withExtension: nil) else {
             fatalError("Could not locate the bundled Shaders directory.")
         }
 
